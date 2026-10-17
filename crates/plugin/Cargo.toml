@@ -1,0 +1,21 @@
+[package]
+name = "cyberhid"
+description = "RED4ext plugin for Cyberpunk 2077: HID controllers (pedals, wheels, sticks) merged into the game's XInput gamepad"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "cyberhid"
+crate-type = ["cdylib"]
+
+[dependencies]
+cyberhid-core = { path = "../core" }
+serde_json = "1.0.151"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61.2", features = [
+    "Win32_Foundation",
+    "Win32_System_LibraryLoader",
+    "Win32_UI_Input_XboxController",
+] }

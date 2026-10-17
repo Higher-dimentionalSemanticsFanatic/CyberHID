@@ -1,0 +1,91 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      release:
+        description: Publish this build as a release tagged v<workspace version>
+        type: boolean
+        default: false
+
+jobs:
+  # Lint and tests on Linux, then the DLL cross-built for Windows (the game
+  # runs under Proton on Linux) and zipped as laid out in the game folder.
+  build:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: System dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-mingw-w64-x86-64
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+          targets: x86_64-pc-windows-gnu
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo clippy --workspace --all-targets --target x86_64-pc-windows-gnu -- -D warnings
+      - run: cargo test --workspace
+      - name: Plugin DLL
+        run: cargo build -p cyberhid --release --target x86_64-pc-windows-gnu
+        env:
+          CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER: x86_64-w64-mingw32-gcc
+      - name: Mod archive
+        run: |
+          ver=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          mkdir -p pkg/red4ext/plugins/cyberhid pkg/r6/scripts/cyberhid
+          cp target/x86_64-pc-windows-gnu/release/cyberhid.dll README.md pkg/red4ext/plugins/cyberhid/
+          cp crates/core/reds/CyberHID.reds pkg/r6/scripts/cyberhid/
+          (cd pkg && zip -r "../CyberHID-$ver.zip" .)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cyberhid
+          path: CyberHID-*.zip
+
+  # The same lint and tests with the MSVC toolchain.
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo test --workspace
+
+  # Running the workflow by hand with "release" ticked publishes the archive
+  # as release v<workspace version> (versions below 1.0 as pre-releases).
+  release:
+    needs: [build, windows]
+    if: inputs.release
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: cyberhid
+          path: dist
+      - name: Checksums
+        working-directory: dist
+        run: sha256sum *.zip > SHA256SUMS && cat SHA256SUMS
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          tag="v$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
+          pre=""
+          case "$tag" in v0.*) pre="--prerelease" ;; esac
+          notes="docs/releases/$tag.md"
+          [ -f "$notes" ] || notes=/dev/null
+          { cat "$notes"; echo; echo "### Install"; echo "Needs RED4ext and Mod Settings (with redscript and ArchiveXL). Unpack CyberHID-*.zip into the game folder or install it with a mod manager, then set the bindings in the game under Settings > Mods > CyberHID. SHA256SUMS lists the archive's checksum."; } > release-notes.md
+          gh release create "$tag" $pre --target "$GITHUB_SHA" --title "CyberHID $tag" --generate-notes \
+            --notes-file release-notes.md \
+            dist/*.zip dist/SHA256SUMS

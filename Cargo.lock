@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "cyberhid"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "cyberhid-core",
  "serde_json",
@@ -13,9 +13,10 @@ dependencies = [
 
 [[package]]
 name = "cyberhid-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "serde",
+ "serde_json",
  "windows-sys",
 ]
 

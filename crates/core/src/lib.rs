@@ -1,7 +1,8 @@
-//! CyberHID's logic that does not need the game or Windows: bindings, the
-//! merge rules, the in-game menu ([`menu`]) and the status file. The
-//! plugin (`crates/plugin`) supplies the hooks and device reads; this crate
-//! is tested on any platform.
+//! CyberHID's logic that does not need the game or Windows: bindings and
+//! their file ([`config`]), the merge rules, controller kinds ([`kind`]) and
+//! the state file the controls window reads. The plugin (`crates/plugin`)
+//! supplies the hooks and device reads; this crate is tested on any
+//! platform.
 //!
 //! Cyberpunk 2077 reads one XInput gamepad. Each binding takes one input of a
 //! HID game controller (an axis, a button or a hat) and adds it to that
@@ -9,23 +10,33 @@
 //! combine. Pedals, wheels, sticks and button boxes then drive the game next
 //! to (or instead of) a real gamepad.
 
-pub mod menu;
+pub mod config;
+pub mod kind;
 #[cfg(windows)]
 pub mod win;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+
+pub use kind::Kind;
 
 pub const PLUGIN_NAME: &str = "CyberHID";
 /// The plugin's version (the workspace version), reported to RED4ext, in
-/// `status.json` and in the mod archive's name.
+/// `state.json` and in the mod archive's name.
 pub const PLUGIN_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// Plugin folder under the game root. RED4ext loads
 /// `red4ext/plugins/<folder>/<name>.dll`, one folder level deep.
 pub const PLUGIN_DIR: &str = "red4ext/plugins/cyberhid";
 pub const PLUGIN_DLL: &str = "cyberhid.dll";
-/// Written by the plugin while the game runs, for players looking up
-/// controller and input numbers.
-pub const STATUS_FILE: &str = "status.json";
+/// The controls window: a Cyber Engine Tweaks mod in this folder under the
+/// game root. The plugin reads [`config::CONFIG_FILE`] and writes
+/// [`STATE_FILE`] there (in its own folder when CET's is missing).
+pub const CET_DIR: &str = "bin/x64/plugins/cyber_engine_tweaks/mods/CyberHID";
+/// Written by the plugin while the game runs: controllers, their inputs
+/// and what the bindings add.
+pub const STATE_FILE: &str = "state.json";
+/// Rewritten by the controls window every second while it is open; the
+/// plugin then writes [`STATE_FILE`] 20 times a second instead of every 5.
+pub const UI_FILE: &str = "ui.json";
 
 pub const PAGE_GENERIC: u16 = 0x01;
 pub const PAGE_SIMULATION: u16 = 0x02;
@@ -75,7 +86,8 @@ pub enum Input {
     Hat { index: u32 },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Target {
     LeftX,
     LeftY,
@@ -142,8 +154,8 @@ pub enum Half {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Binding {
-    /// Controller number in the in-game menu, 1 to [`menu::CONTROLLERS`].
-    pub controller: u32,
+    /// The controller, as [`device_id`].
+    pub device: String,
     pub input: Input,
     pub target: Target,
     pub invert: bool,
@@ -402,14 +414,22 @@ impl Moves {
     }
 }
 
-// ---- plugin status ------------------------------------------------------------
+// ---- state file ---------------------------------------------------------------
 
-/// `status.json`: what the plugin found in the running game.
+/// Round to 3 decimals, which keeps the state file short.
+fn milli(v: f32) -> f32 {
+    (v * 1000.0).round() / 1000.0
+}
+
+/// [`STATE_FILE`]: what the plugin found in the running game.
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
 pub struct Status {
     pub plugin_version: String,
+    /// Wine's version when the game runs under Wine or Proton.
+    pub wine: Option<String>,
     /// Unix seconds.
     pub started: u64,
+    /// Unix milliseconds.
     pub updated: u64,
     /// `module!function` for every XInput function hooked.
     pub hooks: Vec<String>,
@@ -420,19 +440,25 @@ pub struct Status {
     pub merged_reads: u64,
     /// Reads answered with a reported gamepad (no real one on the slot).
     pub emulated_reads: u64,
-    /// Mod Settings' `user.ini` could not be read.
+    /// `config.json` could not be read.
     pub config_error: Option<String>,
-    /// Settings › Mods › CyberHID values were found in `user.ini`.
-    pub menu_saved: bool,
+    /// Bindings that `config.json` lists but the plugin skipped.
+    pub config_warnings: Vec<String>,
+    pub config_saved: bool,
     pub enabled: bool,
-    /// Bindings set in the menu.
+    /// Gamepad slot 1 to 4.
+    pub slot: u32,
+    /// A real gamepad answered the last read of the slot.
+    pub slot_pad: bool,
     pub bindings: usize,
     /// Bindings whose controller and input were found.
     pub active_bindings: usize,
-    /// Game controllers the plugin can read.
+    /// Every game controller connected, XInput gamepads included.
     pub devices: Vec<StatusDevice>,
-    /// Bound controller numbers with no controller connected.
+    /// Bound controllers that are not connected: `name (id)`.
     pub missing: Vec<String>,
+    /// What the bindings add to the gamepad right now.
+    pub output: Output,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
@@ -442,20 +468,78 @@ pub struct StatusDevice {
     pub name: String,
     pub vid: u16,
     pub pid: u16,
-    /// Its number in the in-game menu (Controller 1 to 4).
-    pub controller: Option<u32>,
-    /// An XInput gamepad, read by the game itself (no number).
+    pub kind: Kind,
+    /// [`Kind::label`].
+    pub kind_label: String,
+    /// An XInput gamepad, read by the game itself (not opened).
     pub xinput: bool,
-    /// `Axis 1: X axis`, …
-    pub axis_names: Vec<String>,
-    /// Each axis's position now, percent of its range.
-    pub axis_values: Vec<u8>,
+    /// Opened and reading.
+    pub connected: bool,
+    pub axes: Vec<AxisStatus>,
     pub buttons: usize,
-    pub hats: usize,
+    /// Buttons held down now, numbered from 1.
+    pub pressed: Vec<u32>,
+    /// Each hat: -1 centred, else 0 (up) to 7 clockwise.
+    pub hats: Vec<i8>,
     /// [`Moves::recent`].
     pub recent_inputs: Vec<String>,
     /// A binding uses it.
     pub bound: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct AxisStatus {
+    /// What HID calls it (`Brake`, `X axis`), or `Axis n`.
+    pub name: String,
+    /// Position now, 0 to 1 over its range.
+    pub value: f32,
+}
+
+/// [`Contribution`] as written to the state file.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize)]
+pub struct Output {
+    pub buttons: u16,
+    pub left_trigger: f32,
+    pub right_trigger: f32,
+    pub lx: f32,
+    pub ly: f32,
+    pub rx: f32,
+    pub ry: f32,
+}
+
+impl From<Contribution> for Output {
+    fn from(c: Contribution) -> Self {
+        Output {
+            buttons: c.buttons,
+            left_trigger: milli(c.left_trigger),
+            right_trigger: milli(c.right_trigger),
+            lx: milli(c.lx),
+            ly: milli(c.ly),
+            rx: milli(c.rx),
+            ry: milli(c.ry),
+        }
+    }
+}
+
+impl StatusDevice {
+    /// Inputs of a device as it reads now (`live` is `None` for a device
+    /// that isn't open).
+    pub fn inputs(&mut self, layout: &Layout, live: Option<&Live>) {
+        self.axes = layout
+            .axes
+            .iter()
+            .enumerate()
+            .map(|(i, u)| AxisStatus {
+                name: usage_label(*u).map_or_else(|| format!("Axis {}", i + 1), String::from),
+                value: live.and_then(|l| l.axes.get(i)).map_or(0.0, |v| milli(*v)),
+            })
+            .collect();
+        self.buttons = layout.buttons;
+        self.pressed = live
+            .map(|l| l.buttons.iter().enumerate().filter(|(_, p)| **p).map(|(i, _)| i as u32 + 1).collect())
+            .unwrap_or_default();
+        self.hats = (0..layout.hats).map(|i| live.and_then(|l| l.hats.get(i).copied().flatten()).map_or(-1, |d| d as i8)).collect();
+    }
 }
 
 #[cfg(test)]
@@ -463,7 +547,7 @@ mod tests {
     use super::*;
 
     fn bind(input: Input, target: Target) -> Binding {
-        Binding { controller: 1, input, target, invert: false, deadzone: 0.0, curve: 1.0, half: Half::Full }
+        Binding { device: "046d:c24f".into(), input, target, invert: false, deadzone: 0.0, curve: 1.0, half: Half::Full }
     }
 
     #[test]
@@ -561,5 +645,25 @@ mod tests {
         assert_eq!(m.recent, ["Axis 2", "Button 2", "Hat 1"], "a repeat moves to the front");
         assert_eq!(device_id(0x46d, 0xc24f, 0), "046d:c24f");
         assert_eq!(device_id(0x46d, 0xc24f, 1), "046d:c24f#1");
+    }
+
+    #[test]
+    fn state_lists_inputs_as_read() {
+        let layout = Layout { axes: vec![usage(PAGE_SIMULATION, 0xC5), usage(PAGE_GENERIC, 0x40)], buttons: 4, hats: 2 };
+        let live = Live { axes: vec![0.123_456, 1.0], buttons: vec![false, true, false, true], hats: vec![Some(2), None] };
+        let mut d = StatusDevice::default();
+        d.inputs(&layout, Some(&live));
+        let axes: Vec<_> = d.axes.iter().map(|a| (a.name.as_str(), a.value)).collect();
+        assert_eq!(axes, [("Brake", 0.123), ("Axis 2", 1.0)]);
+        assert_eq!((d.buttons, d.pressed.as_slice(), d.hats.as_slice()), (4, &[2, 4][..], &[2, -1][..]));
+        // Not open: inputs listed at rest.
+        d.inputs(&layout, None);
+        assert_eq!((d.axes[0].value, d.pressed.len(), d.hats.as_slice()), (0.0, 0, &[-1, -1][..]));
+
+        let out = Output::from(Contribution { left_trigger: 0.333_33, lx: -0.5, buttons: 0x1000, ..Contribution::default() });
+        assert_eq!((out.left_trigger, out.lx, out.buttons), (0.333, -0.5, 0x1000));
+        let json = serde_json::to_value(Status { devices: vec![d], ..Status::default() }).unwrap();
+        assert_eq!(json["devices"][0]["kind"], "joystick");
+        assert_eq!(json["output"]["right_trigger"], 0.0);
     }
 }

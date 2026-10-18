@@ -4,10 +4,11 @@
 //! `Supports`, `Query` and `Main`. `Main` hooks XInputGetState (and
 //! XInputGetStateEx, XInputGetCapabilities) in every XInput DLL through
 //! RED4ext's hooking API, then a background thread watches the bindings
-//! (the in-game menu's values in Mod Settings' `user.ini`), opens the
-//! numbered controllers and writes the status file. One thread per open
-//! controller waits for its input reports. The hooks add the bound inputs
-//! to the game's reads of the bound gamepad slot.
+//! (`config.json`, saved by the controls window in Cyber Engine Tweaks),
+//! opens the connected controllers and writes the state file the window
+//! shows. One thread per open controller waits for its input reports. The
+//! hooks add the bound inputs to the game's reads of the bound gamepad
+//! slot.
 
 use std::collections::HashSet;
 use std::ffi::{CString, c_void};
@@ -16,8 +17,8 @@ use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use cyberhid_core::menu::{self, Menu, Numbered};
-use cyberhid_core::{self as hm, Active, Live, Moves, Pad, Status, StatusDevice, win};
+use cyberhid_core::config::{CONFIG_FILE, Config};
+use cyberhid_core::{self as hm, Active, Binding, Live, Moves, Pad, Status, StatusDevice, kind, win};
 use windows_sys::Win32::Foundation::{ERROR_DEVICE_NOT_CONNECTED, ERROR_SUCCESS, HMODULE};
 use windows_sys::Win32::System::LibraryLoader::{
     GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, GET_MODULE_HANDLE_EX_FLAG_PIN, GetModuleFileNameW, GetModuleHandleExW,
@@ -174,10 +175,12 @@ struct Connected {
 
 #[derive(Default)]
 struct Engine {
-    /// Settings › Mods › CyberHID (defaults until saved).
-    menu: Menu,
-    menu_saved: bool,
-    menu_error: Option<String>,
+    /// `config.json` (defaults until saved).
+    config: Config,
+    bindings: Vec<Binding>,
+    config_saved: bool,
+    config_error: Option<String>,
+    config_warnings: Vec<String>,
     /// Controllers opened since the game started; a slot is reused when the
     /// same controller comes back.
     devices: Vec<Connected>,
@@ -186,41 +189,28 @@ struct Engine {
     active: Vec<Active>,
     /// Every game controller seen by the last scan.
     seen: Vec<win::Info>,
-    /// Controllers the menu numbers: every non-XInput controller seen since
-    /// the game started, so numbers don't shift when one is unplugged.
-    numbered: Vec<Numbered>,
+    /// A real gamepad answered the last read of the bound slot.
+    slot_pad: bool,
     /// Per XInput slot: the last pad returned and how often it changed.
     last: [Pad; 4],
     changes: [u32; 4],
 }
 
-fn same(i: &win::Info, n: &Numbered) -> bool {
-    i.vid == n.vid && i.pid == n.pid && i.instance == n.instance
+fn id(i: &win::Info) -> String {
+    hm::device_id(i.vid, i.pid, i.instance)
 }
 
 impl Engine {
-    /// Add newly seen controllers to the menu's numbering.
-    fn number(&mut self) {
-        let mut all = self.numbered.clone();
-        for i in self.seen.iter().filter(|i| !i.xinput) {
-            if !all.iter().any(|c| same(i, c)) {
-                all.push(Numbered { vid: i.vid, pid: i.pid, instance: i.instance, name: i.name.clone() });
-            }
-        }
-        self.numbered = menu::numbered(all);
-    }
-
-    /// The open controller with menu number `n`.
-    fn controller(&self, n: u32) -> Option<usize> {
-        let c = self.numbered.get((n as usize).checked_sub(1)?)?;
-        self.devices.iter().position(|d| d.connected && same(&d.info, c))
+    /// The open controller with this [`hm::device_id`].
+    fn controller(&self, device: &str) -> Option<usize> {
+        self.devices.iter().position(|d| d.connected && id(&d.info) == device)
     }
 
     /// Match every binding to an open controller and input.
     fn rebuild(&mut self) {
         let mut active = Vec::new();
-        for b in &self.menu.bindings {
-            let Some(i) = self.controller(b.controller) else { continue };
+        for b in &self.bindings {
+            let Some(i) = self.controller(&b.device) else { continue };
             if let Some(slot) = hm::resolve(&b.input, &self.devices[i].info.layout) {
                 active.push(Active { binding: b.clone(), device: i, slot });
             }
@@ -228,12 +218,25 @@ impl Engine {
         self.active = active;
     }
 
-    /// Bound controller numbers with no controller open.
-    fn missing(&self) -> Vec<u32> {
-        let mut n: Vec<u32> = self.menu.bindings.iter().map(|b| b.controller).filter(|c| self.controller(*c).is_none()).collect();
-        n.sort_unstable();
-        n.dedup();
-        n
+    /// Bound controllers that are not open, as `name (id)`.
+    fn missing(&self) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        for b in self.config.bindings.iter().filter(|b| self.controller(&b.device).is_none()) {
+            let line = if b.device_name.is_empty() { b.device.clone() } else { format!("{} ({})", b.device_name, b.device) };
+            if !out.contains(&line) {
+                out.push(line);
+            }
+        }
+        out
+    }
+
+    fn has_missing(&self) -> bool {
+        self.config.bindings.iter().any(|b| self.controller(&b.device).is_none())
+    }
+
+    /// XInput user index of the bound slot.
+    fn user(&self) -> u32 {
+        self.config.slot.clamp(1, 4) - 1
     }
 }
 
@@ -246,7 +249,7 @@ fn engine() -> MutexGuard<'static, Engine> {
 static GET_STATE_CALLS: AtomicU64 = AtomicU64::new(0);
 static MERGED_READS: AtomicU64 = AtomicU64::new(0);
 static EMULATED_READS: AtomicU64 = AtomicU64::new(0);
-/// Inputs moved (`Moves`), so the status file follows soon after.
+/// Inputs moved (`Moves`), so the state file follows soon after.
 static MOVES: AtomicU64 = AtomicU64::new(0);
 static STOPPING: AtomicBool = AtomicBool::new(false);
 static HOOKS: Mutex<Vec<(String, usize)>> = Mutex::new(Vec::new());
@@ -297,7 +300,7 @@ fn to_pad(g: &XINPUT_GAMEPAD) -> Pad {
 
 /// Whether the plugin answers for `user` when no real gamepad is there.
 fn emulating(e: &Engine, user: u32) -> bool {
-    e.menu.enabled && e.menu.emulate_pad && user == e.menu.slot && !e.active.is_empty()
+    e.config.enabled && e.config.report_pad && user == e.user() && !e.active.is_empty()
 }
 
 unsafe fn on_state(orig: &AtomicPtr<c_void>, user: u32, state: *mut XINPUT_STATE) -> u32 {
@@ -312,7 +315,11 @@ unsafe fn on_state(orig: &AtomicPtr<c_void>, user: u32, state: *mut XINPUT_STATE
         return r;
     }
     let mut e = engine();
-    if !e.menu.enabled || user != e.menu.slot || user > 3 {
+    if user != e.user() {
+        return r;
+    }
+    e.slot_pad = r == ERROR_SUCCESS;
+    if !e.config.enabled {
         return r;
     }
     let (real, packet) = if r == ERROR_SUCCESS {
@@ -463,23 +470,25 @@ unsafe fn load(handle: HMODULE, sdk: &Sdk) {
             &mut pinned,
         )
     };
-    let Some(dir) = module_dir(handle) else {
+    let Some(plugin_dir) = module_dir(handle) else {
         log(sdk, handle, WARN, "plugin folder not found; nothing bound");
         return;
     };
     {
+        let dir = data_dir(&plugin_dir);
         let mut e = engine();
-        load_menu(&mut e, &user_ini(&dir));
-        let bound = match e.menu_saved {
-            true => format!("{} binding(s) in Settings > Mods > {}", e.menu.bindings.len(), menu::MENU_NAME),
-            false => format!("nothing saved in Settings > Mods > {}", menu::MENU_NAME),
+        load_config(&mut e, &dir.join(CONFIG_FILE));
+        let bound = match (&e.config_error, e.config_saved) {
+            (Some(err), _) => err.clone(),
+            (None, true) => format!("{} binding(s) in {}", e.config.bindings.len(), dir.join(CONFIG_FILE).display()),
+            (None, false) => format!("no {} in {}", CONFIG_FILE, dir.display()),
         };
         drop(e);
         log(sdk, handle, INFO, &format!("{} {VERSION}: {bound}", hm::PLUGIN_NAME));
     }
     unsafe { hook_xinput(handle, sdk) };
     let started = unix_now();
-    let _ = std::thread::Builder::new().name("cyberhid-monitor".into()).spawn(move || monitor(dir, started));
+    let _ = std::thread::Builder::new().name("cyberhid-monitor".into()).spawn(move || monitor(plugin_dir, started));
 }
 
 unsafe fn unload(handle: HMODULE, sdk: &Sdk) {
@@ -495,29 +504,52 @@ unsafe fn unload(handle: HMODULE, sdk: &Sdk) {
 
 // ---- bindings, devices and status ----------------------------------------------
 
-/// Mod Settings' `user.ini`: `red4ext/plugins/mod_settings/` next to this
-/// plugin's folder.
-fn user_ini(dir: &Path) -> PathBuf {
-    dir.parent().unwrap_or(dir).join("mod_settings").join("user.ini")
+/// Where `config.json` and the state file live: the controls window's
+/// folder under the game root (three levels above this plugin's folder),
+/// else this plugin's folder.
+fn data_dir(plugin_dir: &Path) -> PathBuf {
+    if let Some(game) = plugin_dir.ancestors().nth(3) {
+        let cet = hm::CET_DIR.split('/').fold(game.to_path_buf(), |p, c| p.join(c));
+        if cet.is_dir() {
+            return cet;
+        }
+    }
+    plugin_dir.to_path_buf()
 }
 
-fn load_menu(e: &mut Engine, path: &Path) {
-    match std::fs::read(path) {
-        Ok(bytes) => {
-            let m = menu::parse(&String::from_utf8_lossy(&bytes));
-            e.menu_saved = m.is_some();
-            e.menu = m.unwrap_or_default();
-            e.menu_error = None;
-        }
+/// Read `config.json`; false when it could not be read and should be
+/// tried again (the window may be writing it).
+fn load_config(e: &mut Engine, path: &Path) -> bool {
+    let ok = match std::fs::read(path) {
+        Ok(bytes) => match Config::parse(&String::from_utf8_lossy(&bytes)) {
+            Ok((c, warnings)) => {
+                e.config = c;
+                e.config_saved = true;
+                e.config_error = None;
+                e.config_warnings = warnings;
+                true
+            }
+            // Keep the previous bindings until the file reads again.
+            Err(err) => {
+                e.config_error = Some(err);
+                false
+            }
+        },
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-            e.menu = Menu::default();
-            e.menu_saved = false;
-            e.menu_error = None;
+            e.config = Config::default();
+            e.config_saved = false;
+            e.config_error = None;
+            e.config_warnings.clear();
+            true
         }
-        // Keep the previous values until the file reads again.
-        Err(err) => e.menu_error = Some(format!("{}: {err}", menu::USER_INI)),
-    }
+        Err(err) => {
+            e.config_error = Some(format!("{CONFIG_FILE}: {err}"));
+            false
+        }
+    };
+    e.bindings = e.config.bindings();
     e.rebuild();
+    ok
 }
 
 fn modified(path: &Path) -> Option<SystemTime> {
@@ -528,14 +560,16 @@ fn unix_now() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
 }
 
-/// Number the connected controllers and open the ones not yet open: all
-/// but XInput gamepads, so `status.json` shows their inputs moving before
-/// they are bound.
+fn unix_millis() -> u64 {
+    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
+}
+
+/// Open the connected controllers not yet open: all but XInput gamepads,
+/// so the controls window shows their inputs moving before they are bound.
 fn scan() {
     let found = win::list();
     let mut e = engine();
     e.seen = found.clone();
-    e.number();
     let mut opened = Vec::new();
     for info in &found {
         if info.xinput || e.devices.iter().any(|c| c.connected && c.info.path == info.path) {
@@ -560,7 +594,7 @@ fn scan() {
         };
         opened.push((slot, reader));
     }
-    // A new controller may also have taken a bound number.
+    // A bound controller may have come back.
     e.rebuild();
     drop(e);
     for (slot, reader) in opened {
@@ -596,86 +630,120 @@ fn status(started: u64) -> Status {
         .iter()
         .map(|i| {
             let open = e.devices.iter().position(|c| c.connected && c.info.path == i.path);
-            StatusDevice {
-                id: hm::device_id(i.vid, i.pid, i.instance),
+            let k = kind::classify(i.xinput, i.top, &i.layout.axes, i.layout.buttons, &i.name);
+            let mut d = StatusDevice {
+                id: id(i),
                 name: i.name.clone(),
                 vid: i.vid,
                 pid: i.pid,
-                controller: (!i.xinput).then(|| e.numbered.iter().position(|c| same(i, c))).flatten().map(|n| n as u32 + 1),
+                kind: k,
+                kind_label: k.label().into(),
                 xinput: i.xinput,
-                axis_names: i
-                    .layout
-                    .axes
-                    .iter()
-                    .enumerate()
-                    .map(|(n, u)| format!("Axis {}: {}", n + 1, hm::usage_label(*u).unwrap_or("other")))
-                    .collect(),
-                axis_values: open
-                    .and_then(|n| e.live.get(n))
-                    .map(|l| l.axes.iter().map(|v| (v * 100.0).round() as u8).collect())
-                    .unwrap_or_default(),
-                buttons: i.layout.buttons,
-                hats: i.layout.hats,
+                connected: open.is_some(),
                 recent_inputs: open.and_then(|n| e.moves.get(n)).map(|m| m.recent.clone()).unwrap_or_default(),
                 bound: open.is_some_and(|n| e.active.iter().any(|a| a.device == n)),
-            }
+                ..StatusDevice::default()
+            };
+            let layout = open.map_or(&i.layout, |n| &e.devices[n].info.layout);
+            d.inputs(layout, open.and_then(|n| e.live.get(n)));
+            d
         })
         .collect();
     Status {
         plugin_version: VERSION.into(),
+        wine: wine_version(),
         started,
-        updated: unix_now(),
+        updated: unix_millis(),
         hooks: HOOKS.lock().unwrap_or_else(|e| e.into_inner()).iter().map(|(l, _)| l.clone()).collect(),
         hook_errors: HOOK_ERRORS.lock().unwrap_or_else(|e| e.into_inner()).clone(),
         get_state_calls: GET_STATE_CALLS.load(Ordering::Relaxed),
         merged_reads: MERGED_READS.load(Ordering::Relaxed),
         emulated_reads: EMULATED_READS.load(Ordering::Relaxed),
-        config_error: e.menu_error.clone(),
-        menu_saved: e.menu_saved,
-        enabled: e.menu.enabled,
-        bindings: e.menu.bindings.len(),
+        config_error: e.config_error.clone(),
+        config_warnings: e.config_warnings.clone(),
+        config_saved: e.config_saved,
+        enabled: e.config.enabled,
+        slot: e.config.slot,
+        slot_pad: e.slot_pad,
+        bindings: e.config.bindings.len(),
         active_bindings: e.active.len(),
         devices,
-        missing: e.missing().into_iter().map(|n| format!("Controller {n}")).collect(),
+        missing: e.missing(),
+        output: hm::contribution(&e.active, &e.live).into(),
     }
 }
 
-fn write_status(dir: &Path, started: u64) {
-    let Ok(text) = serde_json::to_vec_pretty(&status(started)) else { return };
-    let tmp = dir.join(format!("{}.tmp", hm::STATUS_FILE));
+/// `wine_get_version` from ntdll, present only under Wine and Proton.
+fn wine_version() -> Option<String> {
+    static VERSION: OnceLock<Option<String>> = OnceLock::new();
+    VERSION
+        .get_or_init(|| {
+            let ntdll = unsafe { GetModuleHandleW(wide_z("ntdll.dll").as_ptr()) };
+            if ntdll.is_null() {
+                return None;
+            }
+            let f = unsafe { GetProcAddress(ntdll, c"wine_get_version".as_ptr().cast()) }?;
+            let f: unsafe extern "C" fn() -> *const std::ffi::c_char = unsafe { std::mem::transmute(f) };
+            let p = unsafe { f() };
+            (!p.is_null()).then(|| unsafe { std::ffi::CStr::from_ptr(p) }.to_string_lossy().into_owned())
+        })
+        .clone()
+}
+
+fn write_state(dir: &Path, started: u64) {
+    let Ok(text) = serde_json::to_vec(&status(started)) else { return };
+    let tmp = dir.join(format!("{}.tmp", hm::STATE_FILE));
     if std::fs::write(&tmp, text).is_ok() {
-        let _ = std::fs::rename(&tmp, dir.join(hm::STATUS_FILE));
+        let _ = std::fs::rename(&tmp, dir.join(hm::STATE_FILE));
     }
 }
 
-/// Reload the bindings when Mod Settings saves them, open controllers as
-/// they connect, and write the status file (soon after an input moves).
-fn monitor(dir: PathBuf, started: u64) {
-    let ini_path = user_ini(&dir);
-    let mut ini_time = modified(&ini_path);
+/// The controls window rewrote its heartbeat file in the last 3 seconds.
+fn window_open(dir: &Path) -> bool {
+    modified(&dir.join(hm::UI_FILE)).and_then(|t| SystemTime::now().duration_since(t).ok()).is_some_and(|age| age < Duration::from_secs(3))
+}
+
+/// Reload the bindings when the window saves them, open controllers as
+/// they connect, and write the state file: 20 times a second while the
+/// window is open, else every 5 seconds and soon after an input moves.
+fn monitor(plugin_dir: PathBuf, started: u64) {
+    let mut dir = data_dir(&plugin_dir);
+    // Read again at the first check, in case the read at load failed.
+    let mut config_time = Some(UNIX_EPOCH);
+    let mut last_check: Option<Instant> = None;
     let mut last_scan: Option<Instant> = None;
-    let mut last_status: Option<Instant> = None;
+    let mut last_state: Option<Instant> = None;
     let mut moves = MOVES.load(Ordering::Relaxed);
+    let (mut open, mut missing) = (false, false);
     while !STOPPING.load(Ordering::Relaxed) {
-        let t = modified(&ini_path);
-        let mut rescan = false;
-        if t != ini_time {
-            ini_time = t;
-            load_menu(&mut engine(), &ini_path);
-            rescan = true;
+        let mut changed = false;
+        if last_check.is_none_or(|c| c.elapsed() >= Duration::from_millis(500)) {
+            last_check = Some(Instant::now());
+            // CET's folder may appear after the game started.
+            let d = data_dir(&plugin_dir);
+            let path = d.join(CONFIG_FILE);
+            let t = modified(&path);
+            if d != dir || t != config_time {
+                dir = d;
+                changed = true;
+                // A failed read is tried again on the next check.
+                config_time = if load_config(&mut engine(), &path) { t } else { None };
+            }
+            open = window_open(&dir);
+            missing = engine().has_missing();
         }
-        let missing = !engine().missing().is_empty();
         let due = last_scan.is_none_or(|s| s.elapsed() >= Duration::from_secs(if missing { 3 } else { 30 }));
-        if rescan || due {
+        if changed || due {
             scan();
             last_scan = Some(Instant::now());
         }
         let m = MOVES.load(Ordering::Relaxed);
-        if last_status.is_none_or(|s| s.elapsed() >= Duration::from_secs(5)) || rescan || m != moves {
+        let every = Duration::from_millis(if open { 50 } else { 5000 });
+        if last_state.is_none_or(|s| s.elapsed() >= every) || changed || m != moves {
             moves = m;
-            write_status(&dir, started);
-            last_status = Some(Instant::now());
+            write_state(&dir, started);
+            last_state = Some(Instant::now());
         }
-        std::thread::sleep(Duration::from_millis(500));
+        std::thread::sleep(Duration::from_millis(50));
     }
 }

@@ -21,7 +21,7 @@ jobs:
       - name: System dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y gcc-mingw-w64-x86-64
+          sudo apt-get install -y gcc-mingw-w64-x86-64 luajit
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
@@ -30,6 +30,8 @@ jobs:
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo clippy --workspace --all-targets --target x86_64-pc-windows-gnu -- -D warnings
       - run: cargo test --workspace
+      - name: CET window tests
+        run: luajit cet/tests/run.lua
       - name: Plugin DLL
         run: cargo build -p cyberhid --release --target x86_64-pc-windows-gnu
         env:
@@ -37,9 +39,10 @@ jobs:
       - name: Mod archive
         run: |
           ver=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
-          mkdir -p pkg/red4ext/plugins/cyberhid pkg/r6/scripts/cyberhid
+          cet=pkg/bin/x64/plugins/cyber_engine_tweaks/mods/CyberHID
+          mkdir -p pkg/red4ext/plugins/cyberhid "$cet"
           cp target/x86_64-pc-windows-gnu/release/cyberhid.dll README.md pkg/red4ext/plugins/cyberhid/
-          cp crates/core/reds/CyberHID.reds pkg/r6/scripts/cyberhid/
+          cp cet/CyberHID/*.lua "$cet/"
           (cd pkg && zip -r "../CyberHID-$ver.zip" .)
       - uses: actions/upload-artifact@v4
         with:
@@ -85,7 +88,7 @@ jobs:
           case "$tag" in v0.*) pre="--prerelease" ;; esac
           notes="docs/releases/$tag.md"
           [ -f "$notes" ] || notes=/dev/null
-          { cat "$notes"; echo; echo "### Install"; echo "Needs RED4ext and Mod Settings (with redscript and ArchiveXL). Unpack CyberHID-*.zip into the game folder or install it with a mod manager, then set the bindings in the game under Settings > Mods > CyberHID. SHA256SUMS lists the archive's checksum."; } > release-notes.md
+          { cat "$notes"; echo; echo "### Install"; echo "Needs RED4ext and Cyber Engine Tweaks. Unpack CyberHID-*.zip into the game folder or install it with a mod manager, then set the bindings in the CyberHID window of the CET overlay. Upgrading from 0.1.0: delete r6/scripts/cyberhid. SHA256SUMS lists the archive's checksum."; } > release-notes.md
           gh release create "$tag" $pre --target "$GITHUB_SHA" --title "CyberHID $tag" --generate-notes \
             --notes-file release-notes.md \
             dist/*.zip dist/SHA256SUMS

@@ -28,9 +28,11 @@ pub struct Info {
     /// Which of several identical devices, by path order.
     pub instance: u32,
     pub name: String,
+    /// The top-level collection's usage (joystick, gamepad, ...).
+    pub top: u32,
     pub layout: Layout,
-    /// An XInput gamepad (`IG_` in its path): the game reads it already, and
-    /// the in-game menu leaves it out of its controller numbers.
+    /// An XInput gamepad (`IG_` in its path): the game reads it already,
+    /// so the plugin doesn't open it.
     pub xinput: bool,
 }
 
@@ -53,6 +55,7 @@ struct ButtonCap {
 
 /// What a device declares, read from its preparsed data.
 struct Caps {
+    top: u32,
     axes: Vec<ValueCap>,
     hats: Vec<ValueCap>,
     buttons: Vec<ButtonCap>,
@@ -152,7 +155,7 @@ fn caps(p: &Preparsed) -> Option<Caps> {
     }
     buttons.sort_by_key(|b| b.usage);
     buttons.dedup_by_key(|b| b.usage);
-    Some(Caps { axes, hats, buttons, report_len: c.InputReportByteLength as usize })
+    Some(Caps { top: usage(c.UsagePage, c.Usage), axes, hats, buttons, report_len: c.InputReportByteLength as usize })
 }
 
 fn layout(c: &Caps) -> Layout {
@@ -229,6 +232,7 @@ pub fn list() -> Vec<Info> {
             pid: attr.ProductID,
             instance,
             name: product_name(&h),
+            top: c.top,
             layout: layout(&c),
             xinput,
         });

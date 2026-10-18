@@ -4,8 +4,12 @@ A RED4ext plugin for Cyberpunk 2077 that adds HID game controllers
 (pedals, wheels, flight sticks, throttles, button boxes) to the XInput
 gamepad the game reads. Triggers take the larger value of the gamepad and
 the bound inputs, stick axes add up, buttons combine. Works next to a
-gamepad or with mouse and keyboard alone. Bindings are set in the game,
-under **Settings › Mods › CyberHID**.
+gamepad or with mouse and keyboard alone.
+
+Bindings are set in the **CyberHID** window in the Cyber Engine Tweaks
+overlay: it lists the connected controllers with their type and live
+axes, buttons and hats, and binds a gamepad input by moving the control
+you want for it.
 
 Early version: not yet confirmed in game with real controllers.
 
@@ -18,55 +22,123 @@ Each release has a `SHA256SUMS` file to check the download against.
 ## Install
 
 Needs [RED4ext](https://www.nexusmods.com/cyberpunk2077/mods/2380) and
-[Mod Settings](https://www.nexusmods.com/cyberpunk2077/mods/4885) (which
-needs redscript and ArchiveXL): bindings are set in Mod Settings' menu.
+[Cyber Engine Tweaks](https://www.nexusmods.com/cyberpunk2077/mods/107)
+(CET).
 
 Unpack the archive into the game folder, or install it with a mod manager
 (it is laid out from the game folder). It holds:
 
 - `red4ext/plugins/cyberhid/cyberhid.dll`: the plugin
 - `red4ext/plugins/cyberhid/README.md`: this file
-- `r6/scripts/cyberhid/CyberHID.reds`: the in-game settings
+- `bin/x64/plugins/cyber_engine_tweaks/mods/CyberHID/`: the CyberHID
+  window (`init.lua`, `model.lua`, `ui.lua`)
 
 To uninstall, remove the folders `red4ext/plugins/cyberhid` and
-`r6/scripts/cyberhid`.
+`bin/x64/plugins/cyber_engine_tweaks/mods/CyberHID` (the second one also
+holds your bindings).
 
-## Settings › Mods › CyberHID
+**Upgrading from 0.1.0**: delete `r6/scripts/cyberhid` (the old Settings ›
+Mods › CyberHID menu). Mod Settings is no longer needed, and bindings made
+there are not carried over.
 
-- **General**: **Bindings on**, **Gamepad slot**, **Report a gamepad when
-  none is connected** (with no gamepad on the slot, the plugin reports one
-  while a bound controller is connected).
-- One section per analog gamepad input (**Right trigger**, **Left
-  trigger**, both sticks' X and Y): **Controller**, **Input**, **Invert**,
-  **Deadzone (%)**, **Response**, and **Stick range** on stick axes.
-- **Buttons**: controller and input for each gamepad button and d-pad
-  direction. An axis counts as pressed past half its travel.
-- **D-pad (hat switch)**: a hat switch drives all four d-pad directions.
+### Linux (Proton)
 
-The plugin reads the values again within a second of Mod Settings saving
-them, also while the game runs.
+Under Proton, controllers reach the game through SDL by default, which
+passes at most 6 axes per device and may turn a controller with many
+buttons into a second gamepad. To pass a controller to the game as it is,
+list it in the Steam launch options by USB vendor and product ID:
 
-## Finding the numbers
+```
+PROTON_ENABLE_HIDRAW=0x046d/0xc24f,0x044f/0xb679 %command%
+```
 
-The menu binds by number: **Controller 1** to **4**, and **Axis**,
-**Button** or **Hat** 1 to n on that controller.
+(Proton 9 and later; Proton 10 also takes `PROTON_ENABLE_HIDRAW=1` for
+every device.) Proton opens these through `/dev/hidraw*`, which needs read
+and write access for your user; a udev rule with `TAG+="uaccess"` gives
+it. [CPMX2077](https://github.com/Higher-dimentionalSemanticsFanatic/LinuxCPMX2077)
+does both: Game panel › **CyberHID controllers** › **Set launch option**,
+and **CyberHID controller access** for the udev rule. `lsusb` lists the
+IDs.
 
-- **Controller numbers**: game controllers that are not XInput gamepads,
-  numbered by USB vendor and product ID (the same numbers every session
-  while the same controllers are connected).
-- **Input numbers**: the order the plugin reads the controller in.
+## The CyberHID window
 
-While the game runs, the plugin writes
-`red4ext/plugins/cyberhid/status.json`. Each entry under `devices` is one
-controller: `controller` is its number, `axis_names` and `axis_values` its
-axes and where they are now (percent), and `recent_inputs` the last inputs
-moved, newest first. Press the brake pedal once and it shows as, for
-example, `"Axis 3"` at the top of `recent_inputs`. Many pedals rest at the
-top of their range (`axis_values` near 100): turn **Invert** on for those.
+Open the CET overlay (its key is set when CET first starts). The
+**CyberHID** window shows while the overlay is open.
 
-`missing` lists bound controller numbers with no controller connected,
-`active_bindings` the bindings in use, `hooks` the XInput functions the
-plugin hooked.
+The lines at the top show what the plugin reports: its version and the
+XInput functions it hooked, how many bindings are active, the gamepad
+slot (a real gamepad on it, or one reported by CyberHID), and bound
+controllers that are not connected.
+
+### Controllers
+
+Every game controller the game can see, with an icon and type (wheel,
+pedals, rudder pedals, flight stick, throttle, button box, gamepad,
+joystick). The type is read from the HID usages the controller reports
+(steering, brake, rudder, throttle axes) and otherwise from its name.
+
+Select a controller to see its inputs live:
+
+- **Axes**: each axis with its HID name (`Axis 3 (Brake)`) and position,
+  and what it is bound to. The first two axes also show as a dot in a
+  square, the way a stick moves.
+- **Buttons**: numbered squares, lit while pressed, outlined green when
+  bound.
+- **Hats**: each hat switch's direction.
+- **Last moved**: the inputs moved most recently.
+
+XInput gamepads are listed but not read: the game reads them itself.
+
+### Bindings
+
+The gamepad inputs on the left (triggers, sticks, buttons, d-pad), each
+with what it is bound to and what CyberHID sends for it now. Select one:
+
+- **Scan for input**, then move the axis or press the button you want,
+  on any controller (10 s). Triggers and sticks take the axis that moved
+  a third of its range first, buttons the button pressed first; the
+  **D-pad (hat switch)** takes a hat. A pedal resting at the top of its
+  range gets **Invert** set; one bound to a stick moves the stick from
+  the middle to one end.
+- **Add** adds a binding to pick by hand under **Controller** and
+  **Input**.
+- Each binding shows its input and output live, with **Scan again** and
+  **Remove**, and:
+  - **Invert**: for pedals and triggers that rest at the top.
+  - **Deadzone**: travel ignored at rest (around the middle for a whole
+    stick axis), 0 to 50 %.
+  - **Response**: 1.0 is linear; above 1 gives finer control near rest,
+    below 1 quicker. **Linear**, **Progressive** and **Strong** set 1.0,
+    1.6 and 2.5. The graph shows the curve and where the input is on it.
+  - **Range** (sticks): **Whole axis** for a wheel or stick resting in
+    the middle, **Rest to +** or **Rest to -** for a pedal or button
+    pushing the stick one way.
+  - An axis bound to a button counts as pressed past half its travel.
+
+Several bindings on one gamepad input combine like the gamepad does.
+Changes save to `config.json` at once and apply within a second.
+
+### Settings
+
+- **Enabled**: bound input is added to the gamepad.
+- **Gamepad slot**: the XInput slot the game reads, slot 1 unless several
+  gamepads are connected.
+- **Report a gamepad when none is connected**: with no real gamepad on
+  the slot, the plugin reports one while a binding is active. Off, bound
+  input reaches the game only while a real gamepad is connected.
+- **Plugin**: version, Wine version under Proton, hooked functions and
+  how often the game read the gamepad.
+
+## Files
+
+In the window's folder, `bin/x64/plugins/cyber_engine_tweaks/mods/CyberHID/`
+(the plugin's own folder when CET is not installed):
+
+- `config.json`: the bindings, written by the window.
+- `state.json`: written by the plugin, 20 times a second while the window
+  is open and every 5 seconds otherwise: each controller's inputs, what
+  the bindings send (`output`), `missing` controllers, `hooks`.
+- `ui.json`: rewritten every second while the window is open.
 
 ## How it works
 
@@ -75,15 +147,16 @@ At game start the plugin hooks `XInputGetState`, `XInputGetStateEx` and
 API. It reads game controllers through Windows' `hid.dll` (under Proton:
 Wine's, the same path the game's other input goes through) and adds the
 bound inputs to what the game reads from the chosen gamepad slot. The
-bindings come from Mod Settings' `red4ext/plugins/mod_settings/user.ini`;
-no game scripts call into the plugin. It uses no game offsets, so it does
-not depend on the game version.
+window and the plugin talk only through the files above; no game scripts
+call into the plugin. It uses no game offsets, so it does not depend on
+the game version.
 
 ## Building
 
 ```sh
 cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
+luajit cet/tests/run.lua    # the CET window
 
 # The DLL (Windows target; from Linux with the mingw-w64 gcc package)
 rustup target add x86_64-pc-windows-gnu
@@ -91,14 +164,14 @@ CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER=x86_64-w64-mingw32-gcc \
   cargo build -p cyberhid --release --target x86_64-pc-windows-gnu
 ```
 
-- `crates/core` (`cyberhid-core`): bindings, merge rules, `status.json`,
-  the in-game menu and the Windows `hid.dll` reader; tested on any
-  platform. The menu script `crates/core/reds/CyberHID.reds` is generated
-  by `menu::script`: after changing the menu, run
-  `UPDATE_REDS=1 cargo test -p cyberhid-core menu::`.
+- `crates/core` (`cyberhid-core`): bindings and `config.json`, merge
+  rules, controller types, `state.json` and the Windows `hid.dll` reader;
+  tested on any platform.
 - `crates/plugin` (`cyberhid`): the RED4ext entry points, the XInput hooks
   and the device threads. Builds only for Windows targets (empty
   elsewhere).
+- `cet/CyberHID`: the CET window. `cet/tests` runs it under LuaJIT with
+  stand-ins for CET's ImGui bindings.
 
 CI builds the archive on every push. Running the `build` workflow with
 "release" ticked publishes it as release `v<version>` (the workspace
@@ -112,3 +185,4 @@ a Cyberpunk 2077 mod manager, and needs nothing from it.
 CyberHID is free software under the [GNU GPL v3](LICENSE). It is a
 fan-made mod and is not made by, endorsed by or affiliated with CD PROJEKT
 RED or Nexus Mods. Cyberpunk 2077 is a trademark of CD PROJEKT S.A.
+`cet/tests/json.lua` is rxi's json.lua (MIT license, notice in the file).

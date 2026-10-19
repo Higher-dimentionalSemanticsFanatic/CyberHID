@@ -8,8 +8,7 @@
 //! opens the connected controllers and writes the state file the window
 //! shows. One thread per open controller waits for its input reports. The
 //! hooks add the bound inputs to the game's reads of the bound gamepad
-//! slot; inputs bound to game keys (F13 to F24) are pressed as keyboard
-//! keys while a game window is in front.
+//! slot.
 
 use std::collections::HashSet;
 use std::ffi::{CString, c_void};
@@ -25,10 +24,7 @@ use windows_sys::Win32::System::LibraryLoader::{
     GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, GET_MODULE_HANDLE_EX_FLAG_PIN, GetModuleFileNameW, GetModuleHandleExW,
     GetModuleHandleW, GetProcAddress, LoadLibraryW,
 };
-use windows_sys::Win32::System::Threading::GetCurrentProcessId;
-use windows_sys::Win32::UI::Input::KeyboardAndMouse::{INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, SendInput};
 use windows_sys::Win32::UI::Input::XboxController::{XINPUT_CAPABILITIES, XINPUT_GAMEPAD, XINPUT_STATE};
-use windows_sys::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId};
 
 // ---- RED4ext ABI (RED4ext.SDK, include/RED4ext/Api/v1) -----------------------
 
@@ -195,10 +191,6 @@ struct Engine {
     seen: Vec<win::Info>,
     /// A real gamepad answered the last read of the bound slot.
     slot_pad: bool,
-    /// An active binding drives a game key.
-    has_keys: bool,
-    /// Game keys this plugin holds down (bit 0: F13).
-    keys_down: u16,
     /// Per XInput slot: the last pad returned and how often it changed.
     last: [Pad; 4],
     changes: [u32; 4],
@@ -223,12 +215,10 @@ impl Engine {
                 active.push(Active { binding: b.clone(), device: i, slot });
             }
         }
-        self.has_keys = active.iter().any(|a| a.binding.target.key().is_some());
         self.active = active;
     }
 
-    /// Bound controllers that are not open, as `name (id)`, one entry per
-    /// controller.
+    /// Bound controllers that are not open, as `name (id)`.
     fn missing(&self) -> Vec<String> {
         let mut ids: Vec<&str> = Vec::new();
         for b in self.config.bindings.iter().filter(|b| self.controller(&b.device).is_none()) {
@@ -507,8 +497,6 @@ unsafe fn load(handle: HMODULE, sdk: &Sdk) {
 
 unsafe fn unload(handle: HMODULE, sdk: &Sdk) {
     STOPPING.store(true, Ordering::Relaxed);
-    let held = std::mem::take(&mut engine().keys_down);
-    send_keys(0, held);
     if sdk.hooking.is_null() {
         return;
     }
@@ -628,11 +616,6 @@ fn read_device(slot: usize, mut reader: win::Reader) {
         if e.moves.get_mut(slot).is_some_and(|m| m.update(&live)) {
             MOVES.fetch_add(1, Ordering::Relaxed);
         }
-        let keys = e.has_keys || e.keys_down != 0;
-        drop(e);
-        if keys {
-            sync_keys();
-        }
     }
     let mut e = engine();
     if let Some(c) = e.devices.get_mut(slot) {
@@ -642,61 +625,6 @@ fn read_device(slot: usize, mut reader: win::Reader) {
         *l = reader.idle();
     }
     e.rebuild();
-    drop(e);
-    sync_keys();
-}
-
-// ---- game keys -------------------------------------------------------------------
-
-/// A window of this process (the game) is in front, so keys sent now reach
-/// the game and no other program.
-fn game_in_front() -> bool {
-    let w = unsafe { GetForegroundWindow() };
-    if w.is_null() {
-        return false;
-    }
-    let mut pid = 0u32;
-    unsafe { GetWindowThreadProcessId(w, &mut pid) };
-    pid == unsafe { GetCurrentProcessId() }
-}
-
-/// Press and release game keys to match the bound inputs. Keys are held
-/// only while the game is in front; they are released when it isn't.
-fn sync_keys() {
-    let (press, release) = {
-        let mut e = engine();
-        if !e.has_keys && e.keys_down == 0 {
-            return;
-        }
-        let want = if e.config.enabled && e.has_keys && game_in_front() { hm::contribution(&e.active, &e.live).keys } else { 0 };
-        let down = e.keys_down;
-        e.keys_down = want;
-        (want & !down, down & !want)
-    };
-    send_keys(press, release);
-}
-
-fn send_keys(press: u16, release: u16) {
-    let inputs: Vec<INPUT> = hm::GAME_KEYS
-        .iter()
-        .enumerate()
-        .filter(|(i, _)| (press | release) & (1 << i) != 0)
-        .map(|(i, (vk, scan))| INPUT {
-            r#type: INPUT_KEYBOARD,
-            Anonymous: INPUT_0 {
-                ki: KEYBDINPUT {
-                    wVk: *vk,
-                    wScan: *scan,
-                    dwFlags: if release & (1 << i) != 0 { KEYEVENTF_KEYUP } else { 0 },
-                    time: 0,
-                    dwExtraInfo: 0,
-                },
-            },
-        })
-        .collect();
-    if !inputs.is_empty() {
-        unsafe { SendInput(inputs.len() as u32, inputs.as_ptr(), size_of::<INPUT>() as i32) };
-    }
 }
 
 fn status(started: u64) -> Status {
@@ -746,7 +674,6 @@ fn status(started: u64) -> Status {
         devices,
         missing: e.missing(),
         output: hm::contribution(&e.active, &e.live).into(),
-        keys_held: e.keys_down,
     }
 }
 
@@ -809,8 +736,6 @@ fn monitor(plugin_dir: PathBuf, started: u64) {
             open = window_open(&dir);
             missing = engine().has_missing();
         }
-        // Releases held keys when the game loses focus or a binding goes.
-        sync_keys();
         let due = last_scan.is_none_or(|s| s.elapsed() >= Duration::from_secs(if missing { 3 } else { 30 }));
         if changed || due {
             scan();

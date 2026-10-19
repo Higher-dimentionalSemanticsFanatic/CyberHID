@@ -288,22 +288,6 @@ test("scan binds the input that moved", function()
   eq(model.detect(base, s, "dpad").index, 1)
 end)
 
-test("game keys act like buttons", function()
-  local s = state({ device({ axes = axes(0.5, 0.5, 1.0), buttons = 8 }) })
-  local base = model.snapshot(s)
-  s.devices[1].axes[3].value = 0.2
-  s.devices[1].pressed = { 6 }
-  local f = model.detect(base, s, "key_f13")
-  eq(f.input, "button", "keys prefer buttons")
-  eq(f.index, 6)
-  eq(model.output({ target = "key_f20", input = "axis", deadzone = 0, response = 1 }, 0.8), 1)
-  s.output.keys = 2 ^ 7
-  eq(model.target_output(s, "key_f20"), 1)
-  eq(model.target_output(s, "key_f13"), 0)
-  eq(model.TARGET.key_f24.key, 11)
-  eq(#model.TARGETS, 33)
-end)
-
 test("app saves after changes and scans through ticks", function()
   local s = state({ device({ axes = axes(0.5, 0.5, 1.0), buttons = 8 }) })
   local store = { ["state.json"] = json.encode(s) }
@@ -388,17 +372,6 @@ test("window draws every tab", function()
   has(draw(app), "(controller has 25 button(s))")
   app.selected_target = "left_y"
   has(draw(app), "Range=Pushes - (left, down)")
-  -- A game key bound and held, but the game not in front.
-  table.insert(app.config.bindings, model.clean_binding({ target = "key_f15", device = "046d:c24f", input = "button", index = 3 }))
-  app.state.output.keys = 4
-  app.state.keys_held = 0
-  app.selected_target = "key_f15"
-  out = draw(app)
-  has(out, "Pressed as F15 while the game window is in front")
-  has(out, "Not sent: the game window is not in front.")
-  has(out, "Sent to the game: pressed")
-  app.state.keys_held = 4
-  assert(not draw(app):find("Not sent", 1, true))
   -- Scan from the window.
   app.selected_target = "x"
   clicks["[Magnify] Scan for input"] = true

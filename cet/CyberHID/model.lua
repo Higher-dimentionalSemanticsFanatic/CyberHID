@@ -42,24 +42,9 @@ M.TARGETS = {
   { id = "dpad", label = "D-pad (hat)", kind = "hat", group = "D-pad" },
 }
 
--- Keyboard keys F13 to F24, bound to game actions in the game's own
--- Settings › Key Bindings. `key` is the bit in state.output.keys.
-for n = 13, 24 do
-  table.insert(M.TARGETS, {
-    id = "key_f" .. n, label = "Key F" .. n, kind = "key", key = n - 13, group = "Game keys",
-    hint = "Pressed as F" .. n .. " while the game window is in front: bind a game action to it "
-      .. "in Settings › Key Bindings by pressing this input.",
-  })
-end
-
 M.TARGET = {}
 for _, t in ipairs(M.TARGETS) do
   M.TARGET[t.id] = t
-end
-
--- On/off targets: gamepad buttons and game keys.
-function M.digital(t)
-  return t.kind == "button" or t.kind == "key"
 end
 
 -- state.output field per analog target.
@@ -223,7 +208,6 @@ function M.target_output(state, target)
   if not out then return 0 end
   local t = M.TARGET[target]
   if t.button then return M.has_bit(out.buttons, t.button) and 1 or 0 end
-  if t.kind == "key" then return M.has_bit(out.keys, 2 ^ t.key) and 1 or 0 end
   if t.kind == "hat" then
     local any = false
     for _, id in ipairs({ "dpad_up", "dpad_down", "dpad_left", "dpad_right" }) do
@@ -277,7 +261,7 @@ end
 -- triggers and buttons, -1 to 1 for sticks.
 function M.output(b, v)
   local t = M.TARGET[b.target]
-  if M.digital(t) then
+  if t.kind == "button" then
     return M.from_rest(v, b) > 0.5 and 1 or 0
   elseif t.kind == "stick" then
     if b.range == "rest_to_minus" then return -M.from_rest(v, b) end
@@ -335,7 +319,7 @@ function M.detect(base, state, target)
     end
   end
   if kind == "hat" then return found.hat end
-  if kind == "button" or kind == "key" then return found.button or found.axis end
+  if kind == "button" then return found.button or found.axis end
   return found.axis or found.button
 end
 

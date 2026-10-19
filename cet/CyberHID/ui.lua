@@ -318,7 +318,7 @@ local function input_choices(d, t)
   local buttons = d and d.buttons or 0
   if t.kind == "hat" then
     add("hat", d and #(d.hats or {}) or 0)
-  elseif model.digital(t) then
+  elseif t.kind == "button" then
     add("button", buttons)
     add("axis", axes)
   else
@@ -386,7 +386,7 @@ local function live_rows(app, b, t)
   end
   if v == nil then return end
   local out = model.output(b, v)
-  if model.digital(t) then
+  if t.kind == "button" then
     if out > 0 then colored(OK, "Output: pressed") else ImGui.TextDisabled("Output: released") end
   elseif t.kind == "stick" then
     centred_bar(out, 320, string.format("Output %+.0f %%", out * 100))
@@ -400,7 +400,7 @@ local function options(app, b, t)
   local inv, ch = ImGui.Checkbox("Invert", b.invert)
   if ch then b.invert = inv; app:changed() end
   if ImGui.IsItemHovered() then ImGui.SetTooltip("For pedals and triggers that rest at the top of their range.") end
-  if model.digital(t) then
+  if t.kind == "button" then
     if b.input == "axis" then ImGui.TextDisabled("Pressed past half travel.") end
     return
   end
@@ -483,15 +483,7 @@ local function target_detail(app, t)
   ImGui.SetWindowFontScale(1.3)
   ImGui.Text(t.label)
   ImGui.SetWindowFontScale(1)
-  if t.kind == "key" then
-    ImGui.TextWrapped(t.hint)
-  elseif t.hint then
-    ImGui.TextDisabled(t.hint)
-  end
-  if t.kind == "key" and app.state and model.has_bit(app.state.output and app.state.output.keys, 2 ^ t.key)
-    and not model.has_bit(app.state.keys_held, 2 ^ t.key) then
-    colored(WARN, "Not sent: the game window is not in front.")
-  end
+  if t.hint then ImGui.TextDisabled(t.hint) end
   local out = model.target_output(app.state, t.id)
   if t.kind == "stick" then
     centred_bar(out, 320, string.format("Sent to the game %+.0f %%", out * 100))

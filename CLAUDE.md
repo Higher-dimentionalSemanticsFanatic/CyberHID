@@ -33,11 +33,12 @@ All four checks must pass before pushing.
   free of game and hook code.
 - `crates/plugin` (`cyberhid`, cdylib `cyberhid.dll`): RED4ext ABI v1
   entry points written by hand (`Supports`, `Query`, `Main`), XInput hooks
-  through RED4ext's hooking API, one thread per open controller, a monitor
-  thread that reloads `config.json` and writes `state.json` (20 Hz while
-  the window's `ui.json` heartbeat is fresh). Files live in the CET mod
-  folder (`CET_DIR`), else the plugin folder. Empty on non-Windows
-  targets.
+  through RED4ext's hooking API, game keys F13-F24 through `SendInput`
+  (only while the game's window is in front), one thread per open
+  controller, a monitor thread that reloads `config.json` and writes
+  `state.json` (20 Hz while the window's `ui.json` heartbeat is fresh).
+  Files live in the CET mod folder (`CET_DIR`), else the plugin folder.
+  Empty on non-Windows targets.
 - `cet/CyberHID`: the CET mod. `model.lua` (config, state, scan, the same
   response maths as `contribution`; no ImGui), `ui.lua` (the window),
   `init.lua` (CET events). CET's sandbox: `io.open` and `os.rename` only

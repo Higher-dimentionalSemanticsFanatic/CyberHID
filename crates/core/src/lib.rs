@@ -111,7 +111,39 @@ pub enum Target {
     DpadRight,
     /// All four directions, from a hat switch.
     Dpad,
+    /// Keyboard keys F13 to F24, which no common keyboard has: bound to game
+    /// actions in the game's own Settings › Key Bindings.
+    KeyF13,
+    KeyF14,
+    KeyF15,
+    KeyF16,
+    KeyF17,
+    KeyF18,
+    KeyF19,
+    KeyF20,
+    KeyF21,
+    KeyF22,
+    KeyF23,
+    KeyF24,
 }
+
+/// Windows virtual-key code and set-1 scan code of F13 to F24, the keys
+/// the game lists as `IK_F13` to `IK_F24` (its key ids are virtual-key
+/// codes).
+pub const GAME_KEYS: [(u16, u16); 12] = [
+    (0x7C, 0x64),
+    (0x7D, 0x65),
+    (0x7E, 0x66),
+    (0x7F, 0x67),
+    (0x80, 0x68),
+    (0x81, 0x69),
+    (0x82, 0x6A),
+    (0x83, 0x6B),
+    (0x84, 0x6C),
+    (0x85, 0x6D),
+    (0x86, 0x6E),
+    (0x87, 0x76),
+];
 
 impl Target {
     /// The XInput button bit, for button targets.
@@ -133,6 +165,25 @@ impl Target {
             Target::Y => 0x8000,
             _ => return None,
         })
+    }
+
+    /// Index into [`GAME_KEYS`], for key targets.
+    pub fn key(self) -> Option<usize> {
+        const KEYS: [Target; 12] = [
+            Target::KeyF13,
+            Target::KeyF14,
+            Target::KeyF15,
+            Target::KeyF16,
+            Target::KeyF17,
+            Target::KeyF18,
+            Target::KeyF19,
+            Target::KeyF20,
+            Target::KeyF21,
+            Target::KeyF22,
+            Target::KeyF23,
+            Target::KeyF24,
+        ];
+        KEYS.iter().position(|k| *k == self)
     }
 
     fn is_stick(self) -> bool {
@@ -228,10 +279,12 @@ pub struct Pad {
     pub ry: i16,
 }
 
-/// What the bound inputs add: triggers 0 to 1, stick axes -1 to 1.
+/// What the bound inputs add: triggers 0 to 1, stick axes -1 to 1, and
+/// the game keys held (bit n: [`GAME_KEYS`]`[n]`).
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct Contribution {
     pub buttons: u16,
+    pub keys: u16,
     pub left_trigger: f32,
     pub right_trigger: f32,
     pub lx: f32,
@@ -329,6 +382,12 @@ pub fn contribution(active: &[Active], live: &[Live]) -> Contribution {
         if let Some(bit) = b.target.button() {
             if from_rest(raw, b) > 0.5 {
                 c.buttons |= bit;
+            }
+            continue;
+        }
+        if let Some(k) = b.target.key() {
+            if from_rest(raw, b) > 0.5 {
+                c.keys |= 1 << k;
             }
             continue;
         }
@@ -459,6 +518,9 @@ pub struct Status {
     pub missing: Vec<String>,
     /// What the bindings add to the gamepad right now.
     pub output: Output,
+    /// Game keys the plugin holds down now (bit 0: F13); keys in
+    /// `output.keys` are held only while the game window is in front.
+    pub keys_held: u16,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
@@ -499,6 +561,8 @@ pub struct AxisStatus {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Serialize)]
 pub struct Output {
     pub buttons: u16,
+    /// Game keys held: bit 0 is F13.
+    pub keys: u16,
     pub left_trigger: f32,
     pub right_trigger: f32,
     pub lx: f32,
@@ -511,6 +575,7 @@ impl From<Contribution> for Output {
     fn from(c: Contribution) -> Self {
         Output {
             buttons: c.buttons,
+            keys: c.keys,
             left_trigger: milli(c.left_trigger),
             right_trigger: milli(c.right_trigger),
             lx: milli(c.lx),
@@ -616,6 +681,21 @@ mod tests {
         assert_eq!(pad.buttons, 0x1000 | 0x2000 | 0x0001 | 0x0008);
         assert!(Contribution::default().is_neutral());
         assert_eq!(Contribution::default().apply(pad), pad);
+    }
+
+    #[test]
+    fn buttons_and_pedals_hold_game_keys() {
+        let live = vec![Live { axes: vec![0.9], buttons: vec![true], hats: vec![] }];
+        let f13 = active(bind(Input::Button { index: 0 }, Target::KeyF13), Slot::Button(0));
+        let f24 = active(bind(Input::Axis { index: 0 }, Target::KeyF24), Slot::Axis(0));
+        let c = contribution(&[f13, f24], &live);
+        assert_eq!(c.keys, 1 | 1 << 11);
+        assert_eq!(c.buttons, 0, "keys leave the gamepad alone");
+        assert_eq!(c.apply(Pad::default()), Pad::default());
+        assert_eq!(Target::KeyF24.key().map(|k| GAME_KEYS[k].0), Some(0x87));
+        assert_eq!(Target::A.key(), None);
+        let json: Target = serde_json::from_str("\"key_f17\"").unwrap();
+        assert_eq!(json, Target::KeyF17);
     }
 
     #[test]

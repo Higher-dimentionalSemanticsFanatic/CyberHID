@@ -9,7 +9,9 @@ gamepad or with mouse and keyboard alone.
 Bindings are set in the **CyberHID** window in the Cyber Engine Tweaks
 overlay: it lists the connected controllers with their type and live
 axes, buttons and hats, and binds a gamepad input by moving the control
-you want for it.
+you want for it. Controller buttons can also press the keys F13 to F24,
+so any game action can be put on them in the game's own **Key Bindings**
+menu.
 
 Early version: not yet confirmed in game with real controllers.
 
@@ -91,13 +93,14 @@ XInput gamepads are listed but not read: the game reads them itself.
 
 ### Bindings
 
-The gamepad inputs on the left (triggers, sticks, buttons, d-pad), each
-with what it is bound to and what CyberHID sends for it now. Select one:
+The gamepad inputs on the left (triggers, sticks, buttons, d-pad) and the
+**Game keys** (below), each with what it is bound to and what CyberHID
+sends for it now. Select one:
 
 - **Scan for input**, then move the axis or press the button you want,
   on any controller (10 s). Triggers and sticks take the axis that moved
   a third of its range first, buttons the button pressed first; the
-  **D-pad (hat switch)** takes a hat. A pedal resting at the top of its
+  **D-pad (hat)** takes a hat. A pedal resting at the top of its
   range gets **Invert** set; one bound to a stick moves the stick from
   the middle to one end.
 - **Add** adds a binding to pick by hand under **Controller** and
@@ -118,6 +121,30 @@ with what it is bound to and what CyberHID sends for it now. Select one:
 Several bindings on one gamepad input combine like the gamepad does.
 Changes save to `config.json` at once and apply within a second.
 
+### Game keys and the game's Key Bindings menu
+
+The game's **Settings › Key Bindings** takes keyboard and mouse keys
+only. The **Game keys** group (**Key F13** to **Key F24**) makes a
+controller button press one of the keys F13 to F24, which common
+keyboards don't have. To put a game action on a wheel or button-box
+button:
+
+1. In the CyberHID window, select **Key F13** in **Bindings**, click
+   **Scan for input** and press the button.
+2. Close the overlay, open the game's **Settings › Key Bindings**, click
+   the action (headlights, radio, holster, ...) and press the button: the
+   game records F13.
+
+Keys are pressed only while the game window is in front, so they never
+reach another program; the binding shows **Not sent: the game window is
+not in front.** otherwise. Keys are on or off: an axis bound to a key
+presses it past half its travel. Pedals and steering stay on the gamepad
+triggers and sticks, the only game inputs with analog travel.
+
+Not yet confirmed in game: that the Key Bindings menu accepts F13 to F24
+(the game lists them as keys, `IK_F13` to `IK_F24`). Pressing a key may
+switch the game's on-screen prompts from gamepad to keyboard icons.
+
 ### Settings
 
 - **Enabled**: bound input is added to the gamepad.
@@ -137,7 +164,9 @@ In the window's folder, `bin/x64/plugins/cyber_engine_tweaks/mods/CyberHID/`
 - `config.json`: the bindings, written by the window.
 - `state.json`: written by the plugin, 20 times a second while the window
   is open and every 5 seconds otherwise: each controller's inputs, what
-  the bindings send (`output`), `missing` controllers, `hooks`.
+  the bindings send (`output`, with `keys` for the game keys, bit 0 =
+  F13), the game keys held now (`keys_held`), `missing` controllers,
+  `hooks`.
 - `ui.json`: rewritten every second while the window is open.
 
 ## How it works
@@ -146,7 +175,9 @@ At game start the plugin hooks `XInputGetState`, `XInputGetStateEx` and
 `XInputGetCapabilities` in every `xinput*.dll` through RED4ext's hooking
 API. It reads game controllers through Windows' `hid.dll` (under Proton:
 Wine's, the same path the game's other input goes through) and adds the
-bound inputs to what the game reads from the chosen gamepad slot. The
+bound inputs to what the game reads from the chosen gamepad slot. Game
+keys are pressed with Windows' `SendInput` (virtual-key and scan code)
+while a window of the game's process is in front. The
 window and the plugin talk only through the files above; no game scripts
 call into the plugin. It uses no game offsets, so it does not depend on
 the game version.

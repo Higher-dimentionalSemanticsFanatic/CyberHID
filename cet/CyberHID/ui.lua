@@ -219,16 +219,27 @@ local function device_detail(app, d)
     ImGui.SameLine()
   end
   ImGui.BeginGroup()
-  if ImGui.BeginTable("axes", 3, ImGuiTableFlags.SizingStretchProp) then
+  if ImGui.BeginTable("axes", 4, ImGuiTableFlags.SizingStretchProp) then
     ImGui.TableSetupColumn("Axis", ImGuiTableColumnFlags.WidthFixed, 150)
-    ImGui.TableSetupColumn("Position", ImGuiTableColumnFlags.WidthStretch)
-    ImGui.TableSetupColumn("Bound to", ImGuiTableColumnFlags.WidthFixed, 150)
+    ImGui.TableSetupColumn("Value (-1 to 1)", ImGuiTableColumnFlags.WidthStretch)
+    ImGui.TableSetupColumn("HID value", ImGuiTableColumnFlags.WidthFixed, 75)
+    ImGui.TableSetupColumn("Bound to", ImGuiTableColumnFlags.WidthFixed, 130)
+    ImGui.TableHeadersRow()
     for i, a in ipairs(d.axes) do
       ImGui.TableNextRow()
       ImGui.TableNextColumn()
       ImGui.Text(model.input_label(d, "axis", i))
       ImGui.TableNextColumn()
-      ImGui.ProgressBar(a.value, -1, 0, percent(a.value))
+      ImGui.ProgressBar(a.value, -1, 0, model.axis_text(a.value))
+      ImGui.TableNextColumn()
+      if a.raw then
+        ImGui.Text(string.format("%d", a.raw))
+        if ImGui.IsItemHovered() and a.min and a.max then
+          ImGui.SetTooltip(string.format("Value in the device's input report; logical range %d to %d", a.min, a.max))
+        end
+      else
+        ImGui.TextDisabled("-")
+      end
       ImGui.TableNextColumn()
       local to = bound["axis:" .. i]
       if to then colored(OK, table.concat(to, ", ")) else ImGui.TextDisabled("-") end

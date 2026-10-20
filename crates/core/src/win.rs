@@ -16,7 +16,7 @@ use windows_sys::Win32::Devices::HumanInterfaceDevice::{
 use windows_sys::Win32::Foundation::{CloseHandle, GENERIC_READ, HANDLE, INVALID_HANDLE_VALUE};
 use windows_sys::Win32::Storage::FileSystem::{CreateFileW, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING, ReadFile};
 
-use crate::{GD_HAT_SWITCH, Layout, Live, PAGE_BUTTON, PAGE_GENERIC, PAGE_SIMULATION, usage};
+use crate::{Field, GD_HAT_SWITCH, Layout, Live, PAGE_BUTTON, PAGE_GENERIC, PAGE_SIMULATION, usage};
 
 /// A connected game controller.
 #[derive(Debug, Clone)]
@@ -41,9 +41,7 @@ struct ValueCap {
     page: u16,
     usage: u16,
     link: u16,
-    min: i32,
-    max: i32,
-    bits: u16,
+    field: Field,
     data_index: u16,
 }
 
@@ -119,9 +117,7 @@ fn caps(p: &Preparsed) -> Option<Caps> {
                         page: v.UsagePage,
                         usage: lo + k,
                         link: v.LinkCollection,
-                        min: v.LogicalMin,
-                        max: v.LogicalMax,
-                        bits: v.BitSize,
+                        field: Field { min: v.LogicalMin, max: v.LogicalMax, bits: v.BitSize },
                         data_index: idx.saturating_add(k),
                     });
                 }
@@ -159,7 +155,12 @@ fn caps(p: &Preparsed) -> Option<Caps> {
 }
 
 fn layout(c: &Caps) -> Layout {
-    Layout { axes: c.axes.iter().map(|a| usage(a.page, a.usage)).collect(), buttons: c.buttons.len(), hats: c.hats.len() }
+    Layout {
+        axes: c.axes.iter().map(|a| usage(a.page, a.usage)).collect(),
+        fields: c.axes.iter().map(|a| a.field).collect(),
+        buttons: c.buttons.len(),
+        hats: c.hats.len(),
+    }
 }
 
 fn product_name(h: &Handle) -> String {
@@ -270,6 +271,7 @@ impl Reader {
     pub fn idle(&self) -> Live {
         Live {
             axes: vec![0.0; self.caps.axes.len()],
+            raw: self.caps.axes.iter().map(|a| a.field.range().0).collect(),
             buttons: vec![false; self.caps.buttons.len()],
             hats: vec![None; self.caps.hats.len()],
         }
@@ -298,29 +300,20 @@ impl Reader {
             // Not in this report (another report ID): keep the last value.
             return None;
         }
-        Some(if v.min < 0 && (1..32).contains(&v.bits) {
-            let shift = 32 - v.bits as u32;
-            (((raw << shift) as i32) >> shift) as i64
-        } else {
-            raw as i64
-        })
+        Some(v.field.value(raw))
     }
 
     fn apply(&mut self, live: &mut Live, len: usize) {
         for (i, a) in self.caps.axes.iter().enumerate() {
             let Some(v) = self.value(a, len) else { continue };
-            let (min, mut max) = (a.min as i64, a.max as i64);
-            // Some devices declare an unsigned 16-bit maximum as -1.
-            if max <= min && min >= 0 && (1..32).contains(&a.bits) {
-                max = (1i64 << a.bits) - 1;
-            }
-            if max > min {
-                live.axes[i] = ((v - min) as f32 / (max - min) as f32).clamp(0.0, 1.0);
+            live.raw[i] = v;
+            if let Some(p) = a.field.position(v) {
+                live.axes[i] = p;
             }
         }
         for (i, h) in self.caps.hats.iter().enumerate() {
             let Some(v) = self.value(h, len) else { continue };
-            let (min, max) = (h.min as i64, h.max as i64);
+            let (min, max) = (i64::from(h.field.min), i64::from(h.field.max));
             live.hats[i] = (max > min && v >= min && v <= max).then(|| ((v - min) * 8 / (max - min + 1)) as u8);
         }
         if self.caps.buttons.is_empty() {

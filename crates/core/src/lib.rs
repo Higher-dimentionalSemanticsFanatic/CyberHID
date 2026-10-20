@@ -174,8 +174,50 @@ pub struct Binding {
 pub struct Layout {
     /// Axis usages in the order they are read.
     pub axes: Vec<u32>,
+    /// Each axis's report field, in the order of `axes`.
+    pub fields: Vec<Field>,
     pub buttons: usize,
     pub hats: usize,
+}
+
+/// A HID value field as the device's descriptor declares it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Field {
+    /// Logical minimum and maximum.
+    pub min: i32,
+    pub max: i32,
+    /// Report size in bits.
+    pub bits: u16,
+}
+
+impl Field {
+    /// A report value as the device means it: sign-extended when the
+    /// logical range goes below zero. Proton's SDL path reports every axis
+    /// as 32 bits from -32768 to 32767.
+    pub fn value(self, raw: u32) -> i64 {
+        if self.min < 0 && (1..=32).contains(&self.bits) {
+            let shift = 32 - u32::from(self.bits);
+            i64::from(((raw << shift) as i32) >> shift)
+        } else {
+            i64::from(raw)
+        }
+    }
+
+    /// The logical range. Some devices declare an unsigned maximum as -1.
+    pub fn range(self) -> (i64, i64) {
+        let (min, mut max) = (i64::from(self.min), i64::from(self.max));
+        if max <= min && min >= 0 && (1..=32).contains(&self.bits) {
+            max = (1i64 << self.bits) - 1;
+        }
+        (min, max)
+    }
+
+    /// `value` as 0 to 1 over the logical range; `None` when the range is
+    /// empty.
+    pub fn position(self, value: i64) -> Option<f32> {
+        let (min, max) = self.range();
+        (max > min).then(|| ((value - min) as f64 / (max - min) as f64).clamp(0.0, 1.0) as f32)
+    }
 }
 
 /// Where a binding's input sits in a [`Layout`].
@@ -203,6 +245,8 @@ pub fn resolve(input: &Input, layout: &Layout) -> Option<Slot> {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Live {
     pub axes: Vec<f32>,
+    /// The axes' report values, as [`Field::value`] reads them.
+    pub raw: Vec<i64>,
     pub buttons: Vec<bool>,
     pub hats: Vec<Option<u8>>,
 }
@@ -493,6 +537,10 @@ pub struct AxisStatus {
     pub name: String,
     /// Position now, 0 to 1 over its range.
     pub value: f32,
+    /// The value in the device's report, and its logical range.
+    pub raw: i64,
+    pub min: i64,
+    pub max: i64,
 }
 
 /// [`Contribution`] as written to the state file.
@@ -529,9 +577,15 @@ impl StatusDevice {
             .axes
             .iter()
             .enumerate()
-            .map(|(i, u)| AxisStatus {
-                name: usage_label(*u).map_or_else(|| format!("Axis {}", i + 1), String::from),
-                value: live.and_then(|l| l.axes.get(i)).map_or(0.0, |v| milli(*v)),
+            .map(|(i, u)| {
+                let (min, max) = layout.fields.get(i).copied().unwrap_or_default().range();
+                AxisStatus {
+                    name: usage_label(*u).map_or_else(|| format!("Axis {}", i + 1), String::from),
+                    value: live.and_then(|l| l.axes.get(i)).map_or(0.0, |v| milli(*v)),
+                    raw: live.and_then(|l| l.raw.get(i)).copied().unwrap_or(min),
+                    min,
+                    max,
+                }
             })
             .collect();
         self.buttons = layout.buttons;
@@ -552,7 +606,7 @@ mod tests {
 
     #[test]
     fn resolves_by_position() {
-        let layout = Layout { axes: vec![usage(PAGE_GENERIC, 0x30), usage(PAGE_GENERIC, 0x31)], buttons: 2, hats: 1 };
+        let layout = Layout { axes: vec![usage(PAGE_GENERIC, 0x30), usage(PAGE_GENERIC, 0x31)], buttons: 2, hats: 1, ..Layout::default() };
         assert_eq!(resolve(&Input::Axis { index: 1 }, &layout), Some(Slot::Axis(1)));
         assert_eq!(resolve(&Input::Axis { index: 2 }, &layout), None);
         assert_eq!(resolve(&Input::Button { index: 1 }, &layout), Some(Slot::Button(1)));
@@ -566,7 +620,7 @@ mod tests {
 
     #[test]
     fn pedals_drive_the_triggers() {
-        let live = vec![Live { axes: vec![0.5, 1.0], buttons: vec![], hats: vec![] }];
+        let live = vec![Live { axes: vec![0.5, 1.0], ..Live::default() }];
         let gas = active(bind(Input::Axis { index: 0 }, Target::RightTrigger), Slot::Axis(0));
         // This brake pedal rests at the high end.
         let mut brake = bind(Input::Axis { index: 1 }, Target::LeftTrigger);
@@ -600,7 +654,7 @@ mod tests {
 
     #[test]
     fn sticks_add_and_buttons_combine() {
-        let live = vec![Live { axes: vec![1.0, 0.75], buttons: vec![true, false], hats: vec![Some(1)] }];
+        let live = vec![Live { axes: vec![1.0, 0.75], buttons: vec![true, false], hats: vec![Some(1)], ..Live::default() }];
         let wheel = active(bind(Input::Axis { index: 0 }, Target::LeftX), Slot::Axis(0));
         let mut pedal = bind(Input::Axis { index: 1 }, Target::LeftY);
         pedal.half = Half::Negative;
@@ -620,7 +674,7 @@ mod tests {
 
     #[test]
     fn a_button_on_a_stick_pushes_one_way() {
-        let live = vec![Live { axes: vec![], buttons: vec![true], hats: vec![] }];
+        let live = vec![Live { buttons: vec![true], ..Live::default() }];
         let mut b = bind(Input::Button { index: 0 }, Target::RightY);
         b.half = Half::Negative;
         assert_eq!(contribution(&[active(b.clone(), Slot::Button(0))], &live).ry, -1.0);
@@ -630,7 +684,7 @@ mod tests {
 
     #[test]
     fn moved_inputs_newest_first() {
-        let live = |axes: [f32; 2], button: bool, hat: Option<u8>| Live { axes: axes.to_vec(), buttons: vec![false, button], hats: vec![hat] };
+        let live = |axes: [f32; 2], button: bool, hat: Option<u8>| Live { axes: axes.to_vec(), buttons: vec![false, button], hats: vec![hat], ..Live::default() };
         let mut m = Moves::default();
         // Brake pedal resting at the top; held button at start doesn't count.
         assert!(!m.update(&Live { buttons: vec![false, true], ..live([0.5, 1.0], false, None) }));
@@ -648,17 +702,43 @@ mod tests {
     }
 
     #[test]
+    fn report_fields_signed_and_unsigned() {
+        // Proton's SDL path: every axis 32 bits, -32768 to 32767.
+        let sdl = Field { min: -32768, max: 32767, bits: 32 };
+        let at = |v: i32| sdl.position(sdl.value(v as u32)).unwrap();
+        assert_eq!(sdl.value(-32768i32 as u32), -32768);
+        assert_eq!(at(-32768), 0.0, "the negative end is the start of the range");
+        assert!((at(0) - 0.5).abs() < 1e-4, "{}", at(0));
+        assert_eq!(at(32767), 1.0);
+        let s8 = Field { min: -127, max: 127, bits: 8 };
+        assert_eq!(s8.value(0x81), -127);
+        assert_eq!(s8.value(0x7F), 127);
+        let u12 = Field { min: 0, max: 4095, bits: 12 };
+        assert_eq!(u12.position(u12.value(4095)), Some(1.0));
+        let u16_as_minus_one = Field { min: 0, max: -1, bits: 16 };
+        assert_eq!(u16_as_minus_one.range(), (0, 65535));
+        assert_eq!(u16_as_minus_one.value(65535), 65535);
+        assert_eq!(Field::default().position(3), None, "empty range");
+    }
+
+    #[test]
     fn state_lists_inputs_as_read() {
-        let layout = Layout { axes: vec![usage(PAGE_SIMULATION, 0xC5), usage(PAGE_GENERIC, 0x40)], buttons: 4, hats: 2 };
-        let live = Live { axes: vec![0.123_456, 1.0], buttons: vec![false, true, false, true], hats: vec![Some(2), None] };
+        let fields = vec![Field { min: 0, max: 4095, bits: 12 }, Field { min: -32768, max: 32767, bits: 32 }];
+        let layout = Layout { axes: vec![usage(PAGE_SIMULATION, 0xC5), usage(PAGE_GENERIC, 0x40)], fields, buttons: 4, hats: 2 };
+        let live = Live {
+            axes: vec![0.123_456, 1.0],
+            raw: vec![504, 32767],
+            buttons: vec![false, true, false, true],
+            hats: vec![Some(2), None],
+        };
         let mut d = StatusDevice::default();
         d.inputs(&layout, Some(&live));
-        let axes: Vec<_> = d.axes.iter().map(|a| (a.name.as_str(), a.value)).collect();
-        assert_eq!(axes, [("Brake", 0.123), ("Axis 2", 1.0)]);
+        let axes: Vec<_> = d.axes.iter().map(|a| (a.name.as_str(), a.value, a.raw, a.min, a.max)).collect();
+        assert_eq!(axes, [("Brake", 0.123, 504, 0, 4095), ("Axis 2", 1.0, 32767, -32768, 32767)]);
         assert_eq!((d.buttons, d.pressed.as_slice(), d.hats.as_slice()), (4, &[2, 4][..], &[2, -1][..]));
         // Not open: inputs listed at rest.
         d.inputs(&layout, None);
-        assert_eq!((d.axes[0].value, d.pressed.len(), d.hats.as_slice()), (0.0, 0, &[-1, -1][..]));
+        assert_eq!((d.axes[0].value, d.axes[1].raw, d.pressed.len(), d.hats.as_slice()), (0.0, -32768, 0, &[-1, -1][..]));
 
         let out = Output::from(Contribution { left_trigger: 0.333_33, lx: -0.5, buttons: 0x1000, ..Contribution::default() });
         assert_eq!((out.left_trigger, out.lx, out.buttons), (0.333, -0.5, 0x1000));

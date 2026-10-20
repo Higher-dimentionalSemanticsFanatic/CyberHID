@@ -72,7 +72,8 @@ local imgui = {
   EndTabItem = function() pop("TabItem") end,
   BeginTable = function(id, cols, flags) assert(type(cols) == "number" and type(flags) == "number"); push("Table"); return true end,
   EndTable = function() pop("Table") end,
-  TableSetupColumn = function(label, flags, w) assert(type(flags) == "number") end,
+  TableSetupColumn = function(label, flags, w) assert(type(flags) == "number"); text(label) end,
+  TableHeadersRow = function() end,
   TableNextRow = function() end,
   TableNextColumn = function() return true end,
   PushID = function(id) push("ID") end,
@@ -334,8 +335,17 @@ test("app saves after changes and scans through ticks", function()
   eq(#model.decode_config(store["config.json"], json).bindings, 0)
 end)
 
+test("axis values on the -1 to 1 scale", function()
+  eq(model.axis_text(0), "-1.000")
+  eq(model.axis_text(0.5), "0.000")
+  eq(model.axis_text(0.4999), "0.000", "no -0.000")
+  eq(model.axis_text(1), "1.000")
+  eq(model.axis_text(nil), "-1.000")
+end)
+
 test("window draws every tab", function()
   local wheel = device({ axes = axes(0.25, 0.5, 1.0), buttons = 25, pressed = { 3 }, hats = { 1 }, recent_inputs = { "Button 3" } })
+  wheel.axes[1].raw, wheel.axes[1].min, wheel.axes[1].max = -16384, -32768, 32767
   local pad = device({ id = "045e:028e", name = "Xbox 360 Controller", kind = "gamepad", kind_label = "Gamepad", xinput = true, connected = false })
   local s = state({ wheel, pad }, { active_bindings = 2, missing = { "T-Rudder (044f:b679)" }, wine = "9.0",
     output = { buttons = 0x1000, left_trigger = 0, right_trigger = 0.5, lx = -0.25, ly = 0, rx = 0, ry = 0 } })
@@ -355,6 +365,9 @@ test("window draws every tab", function()
   has(out, "Not connected: T-Rudder (044f:b679)")
   has(out, "[Steering]  G29 Driving Force Racing Wheel##046d:c24f")
   has(out, "Axis 3 (Brake)")
+  has(out, "Value (-1 to 1)")
+  has(out, "-0.500")
+  has(out, "-16384")
   has(out, "Right trigger")
   has(out, "Hat 1: Up-right")
   has(out, "Bound: 3: A")

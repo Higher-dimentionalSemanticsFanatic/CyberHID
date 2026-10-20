@@ -65,6 +65,13 @@ local function clamp(v, lo, hi)
 end
 M.clamp = clamp
 
+-- An axis position (0 to 1 over its range) on the -1 to 1 scale of KDE's
+-- and SDL's controller settings.
+function M.axis_text(v)
+  local s = string.format("%.3f", clamp(v or 0, 0, 1) * 2 - 1)
+  return s == "-0.000" and "0.000" or s
+end
+
 -- Whether XInput bit `b` is set in `mask`.
 function M.has_bit(mask, b)
   return math.floor((mask or 0) / b) % 2 == 1

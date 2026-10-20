@@ -79,9 +79,12 @@ joystick). The type is read from the HID usages the controller reports
 
 Select a controller to see its inputs live:
 
-- **Axes**: each axis with its HID name (`Axis 3 (Brake)`) and position,
-  and what it is bound to. The first two axes also show as a dot in a
-  square, the way a stick moves.
+- **Axes**: each axis with its HID name (`Axis 3 (Brake)`), its
+  position on the -1 to 1 scale of KDE's and SDL's controller settings
+  (**Value (-1 to 1)**: -1 one end, 0 the middle, 1 the other end), the
+  raw number in the device's input report (**HID value**; hover it for
+  the device's declared range) and what it is bound to. The first two
+  axes of a stick also show as a dot in a square, the way it moves.
 - **Buttons**: numbered squares, lit while pressed, outlined green when
   bound.
 - **Hats**: each hat switch's direction.
@@ -137,7 +140,9 @@ In the window's folder, `bin/x64/plugins/cyber_engine_tweaks/mods/CyberHID/`
 - `config.json`: the bindings, written by the window.
 - `state.json`: written by the plugin, 20 times a second while the window
   is open and every 5 seconds otherwise: each controller's inputs, what
-  the bindings send (`output`), `missing` controllers, `hooks`.
+  the bindings send (`output`), `missing` controllers, `hooks`. Each axis
+  has `value` (0 to 1 over its range), `raw` (the report value) and its
+  logical range `min` to `max`.
 - `ui.json`: rewritten every second while the window is open.
 
 ## How it works
